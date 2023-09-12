@@ -381,3 +381,63 @@ proc proxy*(frontend, backend, capture: ZConnection) =
   ## The proxy shall send all messages, received on both frontend and backend, to the capture socket. The capture socket should be a ZMQ_PUB, ZMQ_DEALER, ZMQ_PUSH, or ZMQ_PAIR socket.
   discard proxy(frontend.socket, backend.socket, capture.socket)
   zmqError()
+
+
+proc sendBlob*[T](s: ZSocket, msg: T, flags: ZSendRecvOptions = NOFLAGS) =
+  ## Sends a message through the socket.
+  var m: ZMsg
+  if msg_init(m, sizeOf(msg)) != 0:
+    zmqError()
+    # Using cstring will cause issue with XPUB / XSUB socket that can send a payload containing `\x00`
+    # Copying the memory is safer
+  copyMem(msg_data(m), unsafeAddr(msg), sizeOf(msg))
+  if msg_send(m, s, flags.cint) == -1:
+    zmqError()
+
+
+proc sendBlob*[T](c: ZConnection, msg: T, flags: ZSendRecvOptions = NOFLAGS) =
+  ## Sends a message over the connection.
+  sendBlob(c.socket, msg, flags)
+
+
+proc tryReceiveBlob*[T](typ: typedesc[T], s: ZSocket, flags: ZSendRecvOptions = NOFLAGS): tuple[msgAvailable: bool, moreAvailable: bool, msg: T] =
+  ## Receives a message from a socket.
+  ##
+  ## Indicate whether a message was received or EAGAIN occured by ``msgAvailable``
+  ##
+  ## Indicate if more parts are needed to be received by ``moreAvailable``
+  result.moreAvailable = false
+  result.msgAvailable = false
+
+  var m: ZMsg
+  if msg_init(m) != 0:
+    zmqError()
+
+  if msg_recv(m, s, flags.cint) != -1:
+    # normal case, proceed
+    result.msg = new(typ)
+    result.msgAvailable = true
+    copyMem(addr(result.msg), msg_data(m), msg_size(m))
+    result.moreAvailable = msg_more(m).bool
+  else:
+    # Either an error or EAGAIN
+    # EAGAIN does not raise exception
+    zmqErrorExceptEAGAIN()
+
+  if msg_close(m) != 0:
+    zmqError()
+
+
+
+proc receiveBlob*[T](typ: typedesc[T], s: ZSocket, flags: ZSendRecvOptions = NOFLAGS): T =
+  ## Receive a message on socket.
+  ##
+  ## Return an empty T on eagain
+  tryReceiveBlob(typ, s ,flags).msg
+
+
+proc receiveBlob*[T](typ: typedesc[T], s: ZConnection, flags: ZSendRecvOptions = NOFLAGS): T =
+  ## Receive a message on socket.
+  ##
+  ## Return an empty T on eagain
+  tryReceiveBlob(typ, s.socket, flags).msg
